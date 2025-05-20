@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.sqlite3
+*.log
+*.env
+.env.*
+.DS_Store
+
+# Virtual environments
+venv/
+.env/
+
+# Pytest
+.pytest_cache/
+htmlcov/
+
+# VSCode
+.vscode/
+
+# Docker
+*.tar
+*.pid
+
+# OS
+Thumbs.db
+api.txt
