@@ -240,7 +240,7 @@ class YouTubeDownloaderApp(tk.Tk):
 
     def _on_canvas_configure(self, event):
         canvas_width = event.width
-        num_columns = max(2, min(8, canvas_width // self.video_item_width))
+        num_columns = max(2, min(10, canvas_width // self.video_item_width))
         if num_columns != self.current_columns:
             self.current_columns = num_columns
             self.update_grid_layout()
