@@ -119,6 +119,7 @@ class YouTubeDownloaderApp(tk.Tk):
         self.download_path = os.getcwd()
         self.current_columns = 4
         self.video_item_width = 180
+        self.history = self.load_history()  # Tải lịch sử khi khởi động
 
         self.style = ttk.Style()
         self.style.theme_use("clam")
@@ -508,13 +509,39 @@ class YouTubeDownloaderApp(tk.Tk):
 
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                file_path = ydl.prepare_filename(info)
+                if os.path.exists(file_path):
+                    logger.info(f"Video đã tồn tại: {file_path}")
+                    self.history[url] = {"file_path": file_path, "timestamp": time.time()}
+                    self.save_history()
+                    return True, file_path
                 info = ydl.extract_info(url, download=True)
                 file_path = ydl.prepare_filename(info)
             logger.info(f"Tải thành công: {url}")
+            self.history[url] = {"file_path": file_path, "timestamp": time.time()}
+            self.save_history()
             return True, file_path
         except Exception as e:
             logger.error(f"Lỗi tải video {url}: {str(e)}")
             return False, None
+
+    def load_history(self):
+        try:
+            with open("download_history.json", "r", encoding="utf-8") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+        except Exception as e:
+            logger.error(f"Lỗi khi đọc lịch sử tải: {str(e)}")
+            return {}
+
+    def save_history(self):
+        try:
+            with open("download_history.json", "w", encoding="utf-8") as f:
+                json.dump(self.history, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Lỗi khi lưu lịch sử tải: {str(e)}")
 
     def _update_status(self, msg):
         self.status_label.config(text=f"Trạng thái: {msg}")
