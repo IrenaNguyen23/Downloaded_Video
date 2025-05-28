@@ -12,6 +12,8 @@ __pycache__/
 # Virtual environments
 venv/
 .env/
+build
+dist
 
 # Pytest
 .pytest_cache/

@@ -11,10 +11,12 @@ import shutil
 import re
 import json
 import time
-
+import sys
+import subprocess
 from youtube_api import YouTubeAPIWrapper
 from concurrent.futures import ThreadPoolExecutor
 import logging
+import queue
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,24 +43,30 @@ class VideoItem(tk.Frame):
         self.thumb_url = thumb_url
         self.published_at = published_at
         self.view_count = view_count
+        self.title = title.strip()
+        self.file_path = None  # Lưu đường dẫn file sau khi tải
 
         tk.Checkbutton(self, variable=self.selected, bg="white").grid(row=0, column=0, sticky="nw")
         self.thumb_label = tk.Label(self, text="[Đang tải ảnh…]", width=160, height=90, bg="#eee")
         self.thumb_label.grid(row=1, column=0, pady=(0, 5))
         self.lbl_title = tk.Label(
-            self, text=title.strip(), wraplength=160, justify="left",
+            self, text=self.title, wraplength=160, justify="left",
             font=("Arial", 10, "bold"), bg="white"
         )
         self.lbl_title.grid(row=2, column=0, pady=(0, 5))
         self.lbl_status = tk.Label(self, text="Chưa tải", fg="gray", bg="white", font=("Arial", 10))
         self.lbl_status.grid(row=3, column=0, pady=(0, 5))
 
-        # Hover effect
         self.bind("<Enter>", lambda e: self.config(bg="#f0f0f0"))
         self.bind("<Leave>", lambda e: self.config(bg="white"))
         for child in self.winfo_children():
             child.bind("<Enter>", lambda e: self.config(bg="#f0f0f0"))
             child.bind("<Leave>", lambda e: self.config(bg="white"))
+        
+        # Sự kiện nhấp chuột để mở thư mục
+        self.bind("<Double-1>", self.open_file_location)
+        for child in self.winfo_children():
+            child.bind("<Double-1>", self.open_file_location)
 
     def load_thumbnail(self, executor):
         def load():
@@ -77,11 +85,21 @@ class VideoItem(tk.Frame):
     def is_selected(self):
         return self.selected.get()
 
-    def update_status(self, success):
+    def update_status(self, success, file_path=None):
         if success:
             self.lbl_status.config(text="Đã tải", fg="green")
+            self.file_path = file_path  # Lưu đường dẫn file
         else:
             self.lbl_status.config(text="Lỗi", fg="red")
+
+    def open_file_location(self, event):
+        if self.lbl_status.cget("text") == "Đã tải" and self.file_path:
+            try:
+                # Mở thư mục và highlight file trên Windows
+                subprocess.run(['explorer', '/select,', os.path.normpath(self.file_path)])
+            except Exception as e:
+                logger.error(f"Lỗi khi mở thư mục: {str(e)}")
+                messagebox.showerror("Lỗi", f"Không thể mở thư mục: {str(e)}")
 
 class YouTubeDownloaderApp(tk.Tk):
     def __init__(self):
@@ -89,15 +107,19 @@ class YouTubeDownloaderApp(tk.Tk):
         self.title("YouTube Channel Downloader")
         self.geometry(self.load_config().get("geometry", "920x720"))
         self.configure(bg="#f5f5f5")
+        if sys.platform == 'win32':
+            icon_path = os.path.join(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__))), 'youtube.ico')
+            if os.path.exists(icon_path):
+                self.iconbitmap(icon_path)
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         self.yt_api = YouTubeAPIWrapper(API_KEY)
         self.video_items = []
+        self.all_video_items = []  # Lưu tất cả video để hỗ trợ tìm kiếm
         self.download_path = os.getcwd()
         self.current_columns = 4
         self.video_item_width = 180
 
-        # Configure style
         self.style = ttk.Style()
         self.style.theme_use("clam")
         self.style.configure("TButton", font=("Arial", 10), padding=6)
@@ -109,20 +131,18 @@ class YouTubeDownloaderApp(tk.Tk):
         self._build_ui()
 
     def _build_ui(self):
-        # Top: URL + fetch
         top = tk.Frame(self, bg="#f5f5f5")
         top.pack(fill="x", padx=10, pady=10)
-        tk.Label(top, text="URL kênh hoặc @handle:", font=("Arial", 10), bg="#f5f5f5").pack(side="left")
+        tk.Label(top, text="URL kênh, @handle hoặc video:", font=("Arial", 10), bg="#f5f5f5").pack(side="left")
         self.url_entry = ttk.Entry(top, width=60, font=("Arial", 10))
         self.url_entry.pack(side="left", padx=5)
-        self.url_entry.bind("<Enter>", lambda e: self.show_tooltip(self.url_entry, "Nhập link kênh YouTube hoặc @handle"))
+        self.url_entry.bind("<Enter>", lambda e: self.show_tooltip(self.url_entry, "Nhập link kênh YouTube, @handle hoặc link video"))
         self.url_entry.bind("<Leave>", lambda e: self.hide_tooltip())
         self.fetch_btn = ttk.Button(top, text="Lấy danh sách video", command=self._thread_fetch)
         self.fetch_btn.pack(side="left")
-        self.fetch_btn.bind("<Enter>", lambda e: self.show_tooltip(self.fetch_btn, "Tải danh sách video từ kênh"))
+        self.fetch_btn.bind("<Enter>", lambda e: self.show_tooltip(self.fetch_btn, "Tải danh sách video hoặc thông tin video"))
         self.fetch_btn.bind("<Leave>", lambda e: self.hide_tooltip())
 
-        # Options: folder + audio + sort + theme
         opts = tk.Frame(self, bg="#f5f5f5")
         opts.pack(fill="x", padx=10, pady=5)
         self.folder_btn = ttk.Button(opts, text="Chọn thư mục", command=self.select_folder)
@@ -131,13 +151,15 @@ class YouTubeDownloaderApp(tk.Tk):
         self.folder_btn.bind("<Leave>", lambda e: self.hide_tooltip())
         self.path_label = ttk.Label(opts, text=f"Lưu tại: {self.download_path}")
         self.path_label.pack(side="left", padx=10)
-        self.with_audio = tk.BooleanVar(value=True)
-        self.audio_check = ttk.Checkbutton(
-            opts, text="Tải kèm âm thanh", variable=self.with_audio
+        tk.Label(opts, text="Chế độ tải:", font=("Arial", 10), bg="#f5f5f5").pack(side="left", padx=5)
+        self.download_mode = tk.StringVar(value="video+audio")
+        self.mode_cb = ttk.Combobox(
+            opts, textvariable=self.download_mode,
+            values=["video+audio", "video", "audio"], width=15, state="readonly"
         )
-        self.audio_check.pack(side="left", padx=10)
-        self.audio_check.bind("<Enter>", lambda e: self.show_tooltip(self.audio_check, "Tải video với âm thanh (yêu cầu FFmpeg)"))
-        self.audio_check.bind("<Leave>", lambda e: self.hide_tooltip())
+        self.mode_cb.pack(side="left")
+        self.mode_cb.bind("<Enter>", lambda e: self.show_tooltip(self.mode_cb, "Chọn chế độ tải: Video + Âm thanh, Chỉ video, hoặc Chỉ âm thanh"))
+        self.mode_cb.bind("<Leave>", lambda e: self.hide_tooltip())
         ttk.Label(opts, text="Sắp xếp:").pack(side="left", padx=5)
         self.sort_var = tk.StringVar(value="latest")
         self.sort_cb = ttk.Combobox(
@@ -147,8 +169,13 @@ class YouTubeDownloaderApp(tk.Tk):
         self.sort_cb.bind("<<ComboboxSelected>>", lambda e: self.sort_videos())
         self.sort_cb.bind("<Enter>", lambda e: self.show_tooltip(self.sort_cb, "Sắp xếp video theo tiêu chí"))
         self.sort_cb.bind("<Leave>", lambda e: self.hide_tooltip())
+        ttk.Label(opts, text="Tìm kiếm:").pack(side="left", padx=5)
+        self.search_entry = ttk.Entry(opts, width=20, font=("Arial", 10))
+        self.search_entry.pack(side="left")
+        self.search_entry.bind("<KeyRelease>", self.search_videos)
+        self.search_entry.bind("<Enter>", lambda e: self.show_tooltip(self.search_entry, "Nhập từ khóa để tìm video"))
+        self.search_entry.bind("<Leave>", lambda e: self.hide_tooltip())
 
-        # Middle: canvas with scrollable frame for videos
         middle = tk.Frame(self, bg="#f5f5f5")
         middle.pack(fill="both", expand=True, padx=10, pady=5)
         self.canvas = tk.Canvas(middle, highlightthickness=0, bg="#ffffff")
@@ -167,7 +194,6 @@ class YouTubeDownloaderApp(tk.Tk):
         self.canvas.bind_all("<Button-5>", self._on_mousewheel)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
 
-        # Bottom: download + select all + status + progress
         bottom = tk.Frame(self, bg="#f5f5f5")
         bottom.pack(fill="x", padx=10, pady=10)
         self.download_btn = ttk.Button(bottom, text="Tải video đã chọn", command=self.download_selected)
@@ -189,7 +215,6 @@ class YouTubeDownloaderApp(tk.Tk):
         self.progress_label = ttk.Label(bottom, text="")
         self.progress_label.pack(side="left")
 
-        # Tooltip
         self.tooltip = None
 
     def show_tooltip(self, widget, text):
@@ -236,84 +261,82 @@ class YouTubeDownloaderApp(tk.Tk):
     def clean_video_title(self, title):
         return re.sub(r'#\S+', '', title).strip()
 
-    def save_cache(self, view_counts, channel_id):
-        cache_data = {
-            "channel_id": channel_id,
-            "timestamp": time.time(),
-            "view_counts": view_counts
-        }
-        try:
-            with open("view_count_cache.json", "w", encoding="utf-8") as f:
-                json.dump(cache_data, f, ensure_ascii=False, indent=2)
-            logger.info("Đã lưu cache viewCount")
-        except Exception as e:
-            logger.error(f"Lỗi khi lưu cache: {str(e)}")
-
-    def load_cache(self, channel_id):
-        try:
-            with open("view_count_cache.json", "r", encoding="utf-8") as f:
-                cache_data = json.load(f)
-            if (cache_data.get("channel_id") == channel_id and
-                    time.time() - cache_data.get("timestamp", 0) < 86400):
-                logger.info("Đã tải cache viewCount")
-                return cache_data.get("view_counts", {})
-            return None
-        except FileNotFoundError:
-            return None
-        except Exception as e:
-            logger.error(f"Lỗi khi đọc cache: {str(e)}")
-            return None
+    def search_videos(self, event=None):
+        query = self.search_entry.get().strip().lower()
+        if not query:
+            self.video_items = self.all_video_items.copy()
+        else:
+            self.video_items = [
+                item for item in self.all_video_items
+                if query in item.title.lower()
+            ]
+        self.update_grid_layout()
+        self._update_status(f"Đã lọc {len(self.video_items)} video")
 
     def fetch_videos(self):
         try:
             channel_url = self.url_entry.get().strip()
-            self._update_status("Đang lấy channelId…")
-            channel_id = self.yt_api.get_channel_id(channel_url)
-            self._update_status("Đang tải danh sách video…")
+            self._update_status("Đang xác định URL…")
+            id_value, id_type = self.yt_api.get_channel_id(channel_url)
+            self._update_status("Đang tải thông tin…")
             self.clear_videos()
 
-            items = self.yt_api.fetch_all_videos(channel_id)
-            video_ids = [
-                vid["id"]["videoId"] if "videoId" in vid["id"] else vid["snippet"]["resourceId"]["videoId"]
-                for vid in items
-            ]
+            thumbnail_executor = ThreadPoolExecutor(max_workers=4)
 
-            view_counts = self.load_cache(channel_id)
-            if view_counts is None:
+            if id_type == "video":
+                item = self.yt_api.fetch_single_video(id_value)
+                v_id = item["id"]
+                s = item["snippet"]
+                title = s["title"]
+                thumb_url = s["thumbnails"].get("medium", {}).get("url") or s["thumbnails"].get("default", {}).get("url")
+                published_at = s["publishedAt"]
+                view_count = int(item["statistics"].get("viewCount", 0))
+
+                clean_title = self.clean_video_title(title)
+                video_item = VideoItem(
+                    self.frame_videos, video_id=v_id, title=clean_title, thumb_url=thumb_url,
+                    published_at=published_at, view_count=view_count
+                )
+                video_item.grid(row=0, column=0, padx=10, pady=10, sticky="ew")
+                video_item.load_thumbnail(thumbnail_executor)
+                self.video_items.append(video_item)
+                self.all_video_items.append(video_item)
+            else:
+                items = self.yt_api.fetch_all_videos(id_value)
+                video_ids = [
+                    vid["id"]["videoId"] if "videoId" in vid["id"] else vid["snippet"]["resourceId"]["videoId"]
+                    for vid in items
+                ]
+
                 self._update_status("Đang lấy thông tin lượt xem…")
-                view_counts = {}
+                view_counts = self.yt_api.get_video_stats(video_ids)
                 total_videos = len(video_ids)
                 processed = 0
                 self.progress["maximum"] = total_videos
                 self.progress["value"] = 0
-                for i in range(0, total_videos, 50):
-                    batch_ids = video_ids[i:i + 50]
-                    batch_counts = self.yt_api.get_video_stats(batch_ids)
-                    view_counts.update(batch_counts)
-                    processed += len(batch_ids)
+
+                for index, vid in enumerate(items):
+                    s = vid["snippet"]
+                    v_id = video_ids[index]
+                    title = s["title"]
+                    thumb_url = s["thumbnails"].get("medium", {}).get("url") or s["thumbnails"].get("default", {}).get("url")
+                    published_at = s["publishedAt"]
+                    view_count = view_counts.get(v_id, 0)
+
+                    clean_title = self.clean_video_title(title)
+                    item = VideoItem(
+                        self.frame_videos, video_id=v_id, title=clean_title, thumb_url=thumb_url,
+                        published_at=published_at, view_count=view_count
+                    )
+                    item.grid(row=index // self.current_columns, column=index % self.current_columns, padx=10, pady=10, sticky="ew")
+                    item.load_thumbnail(thumbnail_executor)
+                    self.video_items.append(item)
+                    self.all_video_items.append(item)
+
+                    processed += 1
                     self.progress["value"] = processed
                     self.progress_label.config(text=f"{int(processed / total_videos * 100)}%")
                     self.update_idletasks()
-                self.save_cache(view_counts, channel_id)
-
-            thumbnail_executor = ThreadPoolExecutor(max_workers=4)
-
-            for index, vid in enumerate(items):
-                s = vid["snippet"]
-                v_id = video_ids[index]
-                title = s["title"]
-                thumb_url = s["thumbnails"].get("medium", {}).get("url") or s["thumbnails"].get("default", {}).get("url")
-                published_at = s["publishedAt"]
-                view_count = view_counts.get(v_id, 0)
-
-                clean_title = self.clean_video_title(title)
-                item = VideoItem(
-                    self.frame_videos, video_id=v_id, title=clean_title, thumb_url=thumb_url,
-                    published_at=published_at, view_count=view_count
-                )
-                item.grid(row=index // self.current_columns, column=index % self.current_columns, padx=10, pady=10, sticky="ew")
-                item.load_thumbnail(thumbnail_executor)
-                self.video_items.append(item)
 
             self.progress["value"] = 0
             self.progress_label.config(text="")
@@ -331,6 +354,7 @@ class YouTubeDownloaderApp(tk.Tk):
             w.grid_forget()
             w.destroy()
         self.video_items.clear()
+        self.all_video_items.clear()
 
     def sort_videos(self):
         mode = self.sort_var.get()
@@ -361,8 +385,8 @@ class YouTubeDownloaderApp(tk.Tk):
         self._update_status("Đã hủy chọn tất cả video")
 
     def download_task(self, video_item, result_queue, progress_queue):
-        success = self._download(video_item.url, progress_queue)
-        result_queue.put((video_item, success))
+        success, file_path = self._download(video_item.url, progress_queue)
+        result_queue.put((video_item, success, file_path))
 
     def download_selected(self):
         sel = [w for w in self.video_items if w.is_selected()]
@@ -376,7 +400,6 @@ class YouTubeDownloaderApp(tk.Tk):
         self.progress["value"] = 0
         self.progress_label.config(text="0%")
 
-        import queue
         result_queue = queue.Queue()
         progress_queue = queue.Queue()
 
@@ -411,8 +434,8 @@ class YouTubeDownloaderApp(tk.Tk):
 
             try:
                 while True:
-                    video_item, success = result_queue.get_nowait()
-                    video_item.update_status(success)
+                    video_item, success, file_path = result_queue.get_nowait()
+                    video_item.update_status(success, file_path)
                     nonlocal completed_videos
                     completed_videos = sum(1 for w in sel if w.lbl_status.cget("text") in ["Đã tải", "Lỗi"])
                     self._update_status(f"Đang tải {completed_videos}/{len(sel)} video…")
@@ -440,6 +463,16 @@ class YouTubeDownloaderApp(tk.Tk):
             elif d["status"] == "finished":
                 progress_queue.put(("finished", url))
 
+        base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+        ffmpeg_name = 'ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg'
+        ffmpeg_path = os.path.join(base_dir, ffmpeg_name)
+        if not os.path.exists(ffmpeg_path):
+            ffmpeg_path = shutil.which("ffmpeg")
+            if not ffmpeg_path:
+                logger.error("FFmpeg không tìm thấy trong ứng dụng hoặc PATH")
+                return False, None
+
+        mode = self.download_mode.get()
         opts = {
             "outtmpl": os.path.join(self.download_path, "%(title)s.%(ext)s"),
             "quiet": True,
@@ -449,22 +482,39 @@ class YouTubeDownloaderApp(tk.Tk):
             "fragment_retries": 3,
             "progress_hooks": [progress_hook],
         }
-        if self.with_audio.get():
-            opts.update({"format": "bestvideo+bestaudio/best", "merge_output_format": "mp4"})
+
+        if mode == "video+audio":
+            opts.update({
+                "format": "bestvideo+bestaudio/best",
+                "merge_output_format": "mp4"
+            })
             if not shutil.which("ffmpeg"):
                 logger.error("FFmpeg không được cài đặt")
-                return False
-        else:
+                return False, None
+        elif mode == "video":
             opts.update({"format": "bestvideo"})
+        elif mode == "audio":
+            opts.update({
+                "format": "bestaudio[ext=m4a]",
+                "postprocessors": [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "320",
+                }],
+            })
+            if not shutil.which("ffmpeg"):
+                logger.error("FFmpeg không được cài đặt")
+                return False, None
 
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([url])
+                info = ydl.extract_info(url, download=True)
+                file_path = ydl.prepare_filename(info)
             logger.info(f"Tải thành công: {url}")
-            return True
+            return True, file_path
         except Exception as e:
             logger.error(f"Lỗi tải video {url}: {str(e)}")
-            return False
+            return False, None
 
     def _update_status(self, msg):
         self.status_label.config(text=f"Trạng thái: {msg}")
