@@ -120,6 +120,8 @@ class YouTubeDownloaderApp(tk.Tk):
         self.current_columns = 4
         self.video_item_width = 180
         self.history = self.load_history()  # Tải lịch sử khi khởi động
+        self.cancel_event = threading.Event()  # Cờ để hủy tải
+        self.download_futures = []  # Lưu danh sách futures để hủy
 
         self.style = ttk.Style()
         self.style.theme_use("clam")
@@ -199,7 +201,7 @@ class YouTubeDownloaderApp(tk.Tk):
         bottom.pack(fill="x", padx=10, pady=10)
         self.download_btn = ttk.Button(bottom, text="Tải video đã chọn", command=self.download_selected)
         self.download_btn.pack(side="left")
-        self.download_btn.bind("<Enter>", lambda e: self.show_tooltip(self.download_btn, "Tải các video được chọn"))
+        self.download_btn.bind("<Enter>", self._update_download_btn_tooltip)
         self.download_btn.bind("<Leave>", lambda e: self.hide_tooltip())
         self.select_all_btn = ttk.Button(bottom, text="Chọn tất cả", command=self.select_all)
         self.select_all_btn.pack(side="left", padx=5)
@@ -217,6 +219,12 @@ class YouTubeDownloaderApp(tk.Tk):
         self.progress_label.pack(side="left")
 
         self.tooltip = None
+
+    def _update_download_btn_tooltip(self, event):
+        if self.download_btn.cget("text") == "Hủy tải":
+            self.show_tooltip(self.download_btn, "Hủy quá trình tải hiện tại")
+        else:
+            self.show_tooltip(self.download_btn, "Tải các video được chọn")
 
     def show_tooltip(self, widget, text):
         if self.tooltip:
@@ -395,8 +403,10 @@ class YouTubeDownloaderApp(tk.Tk):
             messagebox.showinfo("Thông báo", "Bạn chưa chọn video nào.")
             return
 
+        self.cancel_event.clear()  # Reset cờ hủy
+        self.download_futures = []  # Reset danh sách futures
         self._update_status(f"Đang tải 0/{len(sel)} video…")
-        self.download_btn.config(state="disabled")
+        self.download_btn.config(text="Hủy tải", command=self.cancel_download, state="normal")
         self.progress["maximum"] = 100
         self.progress["value"] = 0
         self.progress_label.config(text="0%")
@@ -411,10 +421,15 @@ class YouTubeDownloaderApp(tk.Tk):
         def download_in_thread():
             with ThreadPoolExecutor(max_workers=4) as executor:
                 futures = [executor.submit(self.download_task, w, result_queue, progress_queue) for w in sel]
+                self.download_futures = futures
                 for future in futures:
-                    future.result()
+                    try:
+                        future.result()
+                    except Exception as e:
+                        logger.error(f"Lỗi trong tác vụ tải: {str(e)}")
 
         def check_queues():
+            nonlocal completed_videos
             try:
                 while True:
                     msg_type, url, *data = progress_queue.get_nowait()
@@ -437,25 +452,59 @@ class YouTubeDownloaderApp(tk.Tk):
                 while True:
                     video_item, success, file_path = result_queue.get_nowait()
                     video_item.update_status(success, file_path)
-                    nonlocal completed_videos
-                    completed_videos = sum(1 for w in sel if w.lbl_status.cget("text") in ["Đã tải", "Lỗi"])
+                    completed_videos += 1
                     self._update_status(f"Đang tải {completed_videos}/{len(sel)} video…")
-                    if completed_videos == len(sel):
-                        self._update_status("Tải hoàn tất")
-                        self.download_btn.config(state="normal")
-                        self.progress["value"] = 0
-                        self.progress_label.config(text="")
+                    if completed_videos == len(sel) or self.cancel_event.is_set():
+                        self._finalize_download()
                         return
             except queue.Empty:
                 pass
+
+            if self.cancel_event.is_set():
+                self._finalize_download()
+                return
 
             self.after(100, check_queues)
 
         threading.Thread(target=download_in_thread, daemon=True).start()
         self.after(100, check_queues)
 
+    def cancel_download(self):
+        self.cancel_event.set()  # Đặt cờ hủy
+        for future in self.download_futures:
+            future.cancel()  # Hủy các tác vụ đang chờ
+        self._clean_partial_files()  # Dọn file tải dở
+        self._update_status("Đã hủy tải")
+        self._finalize_download()
+
+    def _finalize_download(self):
+        self.download_btn.config(text="Tải video đã chọn", command=self.download_selected, state="normal")
+        self.progress["value"] = 0
+        self.progress_label.config(text="")
+        self.download_futures = []
+        # Cập nhật trạng thái video: giữ "Đã tải", đặt lại các trạng thái khác thành "Chưa tải"
+        for item in self.video_items:
+            if item.lbl_status.cget("text") not in ["Đã tải"]:
+                item.lbl_status.config(text="Chưa tải", fg="gray")
+                item.file_path = None
+
+    def _clean_partial_files(self):
+        try:
+            for file in os.listdir(self.download_path):
+                if file.endswith(('.part', '.ytdl', '.temp')):
+                    file_path = os.path.join(self.download_path, file)
+                    os.remove(file_path)
+                    logger.info(f"Đã xóa file tạm: {file_path}")
+        except Exception as e:
+            logger.error(f"Lỗi khi dọn file tạm: {str(e)}")
+
     def _download(self, url, progress_queue):
+        if self.cancel_event.is_set():
+            return False, None
+
         def progress_hook(d):
+            if self.cancel_event.is_set():
+                return
             if d["status"] == "downloading":
                 downloaded = d.get("downloaded_bytes", 0)
                 total = d.get("total_bytes") or d.get("total_bytes_estimate", 0)
@@ -516,6 +565,8 @@ class YouTubeDownloaderApp(tk.Tk):
                     self.history[url] = {"file_path": file_path, "timestamp": time.time()}
                     self.save_history()
                     return True, file_path
+                if self.cancel_event.is_set():
+                    return False, None
                 info = ydl.extract_info(url, download=True)
                 file_path = ydl.prepare_filename(info)
             logger.info(f"Tải thành công: {url}")
@@ -565,6 +616,8 @@ class YouTubeDownloaderApp(tk.Tk):
             return {}
 
     def on_closing(self):
+        self.cancel_event.set()  # Hủy tải nếu đóng ứng dụng
+        self._clean_partial_files()
         self.save_config()
         self.destroy()
 
