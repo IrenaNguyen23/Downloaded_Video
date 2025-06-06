@@ -1,4 +1,5 @@
 import os
+import tempfile
 from dotenv import load_dotenv
 import threading
 import tkinter as tk
@@ -28,6 +29,26 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Xử lý .env trong .exe
+def get_resource_path(relative_path):
+    """Lấy đường dẫn tài nguyên trong .exe hoặc khi chạy trực tiếp"""
+    try:
+        base_path = sys._MEIPASS
+    except AttributeError:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_path, relative_path)
+
+# Tạo .env tạm nếu chạy từ .exe
+env_path = get_resource_path(".env")
+if os.path.exists(env_path):
+    load_dotenv(env_path)
+else:
+    # Tạo .env tạm nếu không tìm thấy
+    with open(os.path.join(tempfile.gettempdir(), ".env"), "w") as f:
+        f.write("YOUTUBE_API_KEY=your_api_key_here")
+    load_dotenv(os.path.join(tempfile.gettempdir(), ".env"))
 
 load_dotenv()
 API_KEY = os.getenv("YOUTUBE_API_KEY")
@@ -517,10 +538,9 @@ class YouTubeDownloaderApp(tk.Tk):
         ffmpeg_name = 'ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg'
         ffmpeg_path = os.path.join(base_dir, ffmpeg_name)
         if not os.path.exists(ffmpeg_path):
-            ffmpeg_path = shutil.which("ffmpeg")
-            if not ffmpeg_path:
-                logger.error("FFmpeg không tìm thấy trong ứng dụng hoặc PATH")
-                return False, None
+            logger.error(f"FFmpeg không tìm thấy tại: {ffmpeg_path}")
+            messagebox.showerror("Lỗi", "FFmpeg không tìm thấy. Đảm bảo ffmpeg.exe được nhúng trong build.")
+            return False, None
 
         mode = self.download_mode.get()
         opts = {
@@ -528,9 +548,12 @@ class YouTubeDownloaderApp(tk.Tk):
             "quiet": True,
             "noplaylist": True,
             "restrictfilenames": True,
-            "retries": 3,
-            "fragment_retries": 3,
+            "retries": 10,  # Tăng số lần thử lại
+            "fragment_retries": 10,  # Tăng thử lại cho đoạn
+            "socket_timeout": 30,  # Timeout 30 giây
+            "http_chunk_size": 10485760,  # 10MB chunk để ổn định tải 4K
             "progress_hooks": [progress_hook],
+            "ffmpeg_location": ffmpeg_path,
         }
 
         if mode == "video+audio":
@@ -538,9 +561,6 @@ class YouTubeDownloaderApp(tk.Tk):
                 "format": "bestvideo+bestaudio/best",
                 "merge_output_format": "mp4"
             })
-            if not shutil.which("ffmpeg"):
-                logger.error("FFmpeg không được cài đặt")
-                return False, None
         elif mode == "video":
             opts.update({"format": "bestvideo"})
         elif mode == "audio":
@@ -552,9 +572,6 @@ class YouTubeDownloaderApp(tk.Tk):
                     "preferredquality": "320",
                 }],
             })
-            if not shutil.which("ffmpeg"):
-                logger.error("FFmpeg không được cài đặt")
-                return False, None
 
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -575,11 +592,12 @@ class YouTubeDownloaderApp(tk.Tk):
             return True, file_path
         except Exception as e:
             logger.error(f"Lỗi tải video {url}: {str(e)}")
+            messagebox.showerror("Lỗi", f"Lỗi tải video: {str(e)}")
             return False, None
 
     def load_history(self):
         try:
-            with open("download_history.json", "r", encoding="utf-8") as f:
+            with open(get_resource_path("download_history.json"), "r", encoding="utf-8") as f:
                 return json.load(f)
         except FileNotFoundError:
             return {}
@@ -589,7 +607,7 @@ class YouTubeDownloaderApp(tk.Tk):
 
     def save_history(self):
         try:
-            with open("download_history.json", "w", encoding="utf-8") as f:
+            with open(get_resource_path("download_history.json"), "w", encoding="utf-8") as f:
                 json.dump(self.history, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.error(f"Lỗi khi lưu lịch sử tải: {str(e)}")
@@ -597,23 +615,23 @@ class YouTubeDownloaderApp(tk.Tk):
     def _update_status(self, msg):
         self.status_label.config(text=f"Trạng thái: {msg}")
 
-    def save_config(self):
-        config = {"geometry": self.geometry()}
-        try:
-            with open("config.json", "w", encoding="utf-8") as f:
-                json.dump(config, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.error(f"Lỗi khi lưu config: {str(e)}")
-
     def load_config(self):
         try:
-            with open("config.json", "r", encoding="utf-8") as f:
+            with open(get_resource_path("config.json"), "r", encoding="utf-8") as f:
                 return json.load(f)
         except FileNotFoundError:
             return {}
         except Exception as e:
             logger.error(f"Lỗi khi đọc config: {str(e)}")
             return {}
+
+    def save_config(self):
+        config = {"geometry": self.geometry()}
+        try:
+            with open(get_resource_path("config.json"), "w", encoding="utf-8") as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Lỗi khi lưu config: {str(e)}")
 
     def on_closing(self):
         self.cancel_event.set()  # Hủy tải nếu đóng ứng dụng

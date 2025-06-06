@@ -58,6 +58,10 @@ class YouTubeAPIWrapper:
                 # Xử lý link video
                 video_id = url_or_handle.split("watch?v=")[-1].split("&")[0]
                 return video_id, "video"
+            if "shorts/" in url_or_handle:
+                # Xử lý link video Shorts
+                video_id = url_or_handle.split("shorts/")[-1].split("?")[0].split("/")[0]
+                return video_id, "video"
             if "channel/" in url_or_handle:
                 return url_or_handle.split("channel/")[1].split("/")[0], "channel"
             if "@" in url_or_handle:

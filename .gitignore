@@ -18,6 +18,7 @@ dist
 # Pytest
 .pytest_cache/
 htmlcov/
+api.txt
 
 # VSCode
 .vscode/
